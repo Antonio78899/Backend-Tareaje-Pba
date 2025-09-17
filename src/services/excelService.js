@@ -1,11 +1,14 @@
+// src/services/excel.service.js
 const ExcelJS = require('exceljs');
+
 const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 const safeName = (s) =>
   (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
 
-// Horas dec -> valor de tiempo Excel (días)
+// Convierte horas decimales -> valor de tiempo Excel (fracción de día)
 const toExcelTime = (hours) => safeNum(hours) / 24;
-// Horas dec -> "HH:MM" (para negativos como texto)
+
+// Formatea horas decimales como "HH:MM" (para negativos como texto)
 const decToHHMM = (h) => {
   const n = Number(h) || 0;
   const sign = n < 0 ? '-' : '';
@@ -16,7 +19,7 @@ const decToHHMM = (h) => {
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
-// Helpers semanas sin dayjs
+// ---- Helpers para semanas (lunes–domingo) sin libs externas ----
 const ymd = (d) => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -26,7 +29,7 @@ const ymd = (d) => {
 const mondayOf = (dateStr) => {
   const d = new Date(dateStr + 'T00:00:00');
   const dow = d.getDay(); // 0=Dom,1=Lun,...6=Sab
-  const diffToMonday = (dow + 6) % 7;
+  const diffToMonday = (dow + 6) % 7; // Dom->6, Lun->0, ...
   d.setDate(d.getDate() - diffToMonday);
   return ymd(d);
 };
@@ -43,6 +46,7 @@ async function buildWorkbook(employeesCalcs) {
   for (const item of employeesCalcs || []) {
     const { employee, calc } = item || {};
     const ws = wb.addWorksheet(safeName(employee?.fullName), {
+      // congelamos hasta la fila de fechas
       views: [{ state: 'frozen', xSplit: 2, ySplit: 5 }],
     });
 
@@ -58,7 +62,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B3').font = { bold: true };
 
     // Encabezados por día
-    ws.getCell('B5').value = '';
+    ws.getCell('B5').value = ''; // columna de etiquetas
     ws.getCell('B6').value = 'Horas Trabajadas';
     ws.getCell('B6').font = { bold: true };
     ws.getCell('B7').value = 'Horas Extras';
@@ -66,26 +70,27 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B8').value = 'Horas a Deber';
     ws.getCell('B8').font = { bold: true };
 
-    // Base diaria (sólo para owed diario informativo)
+    // Base diaria requerida (solo para “a deber” diario informativo)
     const baseHoursPerDay = Number.isFinite(Number(calc?.baseHoursPerDay))
       ? Number(calc.baseHoursPerDay)
       : 8;
 
-    // ---- Grilla diaria + acumular extra diaria ----
+    // ---- Grilla diaria
     let col = 3; // C
     const daysArr = [];
+
     for (const d of (calc?.days || [])) {
       const dateStr = d?.date;
       const worked = safeNum(d?.worked);
       const overtime = safeNum(d?.overtime);
 
-      // Fecha
+      // Fecha (fila 5)
       const cDate = ws.getRow(5).getCell(col);
       cDate.value = dateStr ? new Date(dateStr + 'T00:00:00') : null;
       if (cDate.value) cDate.numFmt = 'dd/mm/yyyy';
       cDate.alignment = { horizontal: 'center' };
 
-      // Trabajadas
+      // Horas trabajadas (fila 6)
       const cWorked = ws.getRow(6).getCell(col);
       if (worked === 0) {
         cWorked.value = 'DESCANSO';
@@ -96,7 +101,7 @@ async function buildWorkbook(employeesCalcs) {
         cWorked.alignment = { horizontal: 'center' };
       }
 
-      // Extras (diarias)
+      // Horas extras (diarias) (fila 7)
       const cOT = ws.getRow(7).getCell(col);
       if (worked === 0) {
         cOT.value = 'DESCANSO';
@@ -107,7 +112,7 @@ async function buildWorkbook(employeesCalcs) {
         cOT.alignment = { horizontal: 'center' };
       }
 
-      // A deber (diario informativo)
+      // Horas a deber (diarias, informativo) (fila 8)
       const cOwed = ws.getRow(8).getCell(col);
       if (worked === 0) {
         cOwed.value = 'DESCANSO';
@@ -123,7 +128,7 @@ async function buildWorkbook(employeesCalcs) {
       col++;
     }
 
-    // ---- Resumen semanal: extra >48h, deuda <48h ----
+    // ---- Resumen semanal: Extra (>48h) y Deuda (<48h)
     const weeksMap = new Map();
     for (const d of daysArr) {
       const wk = mondayOf(d.date);
@@ -140,9 +145,9 @@ async function buildWorkbook(employeesCalcs) {
 
       const workedSum = arr.reduce((acc, x) => acc + safeNum(x.worked), 0);
 
-      // NUEVA DEFINICIÓN
+      // NUEVA definición: extra sobre 48h, deuda por debajo de 48h
       const extraWeek = Math.max(0, workedSum - WEEK_TARGET);
-      const owedWeek = Math.max(0, WEEK_TARGET - workedSum);
+      const owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
       const netW = extraWeek - owedWeek; // == workedSum - 48
 
       weekly.push({
@@ -154,12 +159,12 @@ async function buildWorkbook(employeesCalcs) {
       });
 
       sumWorked += workedSum;
-      sumExtra += extraWeek;
-      sumOwed += owedWeek;
-      sumNet += netW;
+      sumExtra  += extraWeek;
+      sumOwed   += owedWeek;
+      sumNet    += netW;
     }
 
-    // ---- Total Neto (Extras - Deber) en C3 ----
+    // ---- Total Neto (Extras - Deber) en C3
     const cTotal = ws.getCell('C3');
     if (sumNet >= 0) {
       cTotal.value = toExcelTime(sumNet);
@@ -169,15 +174,19 @@ async function buildWorkbook(employeesCalcs) {
     }
     cTotal.alignment = { horizontal: 'center' };
 
-    // ---- Encabezados del resumen (opcional: renombrar para que quede claro) ----
+    // ---- Resumen semanal (meta 48h)
+    let row = 10;
     ws.getCell(`B${row}`).value = 'Resumen semanal (meta 48 h)';
+    ws.getCell(`B${row}`).font = { bold: true };
     row++;
+
+    // Encabezados
     ws.getCell(`B${row}`).value = 'Semana';
     ws.getCell(`C${row}`).value = 'Trabajadas';
-    ws.getCell(`D${row}`).value = 'Horas extra (>48h)';   // <-- renombrado sugerido
-    ws.getCell(`E${row}`).value = 'Horas a deber (48h)';  // igual
+    ws.getCell(`D${row}`).value = 'Horas extra (>48h)';   // renombrado claro
+    ws.getCell(`E${row}`).value = 'Horas a deber (48h)';
     ws.getCell(`F${row}`).value = 'Neto (Extra - Deber)';
-    ['B', 'C', 'D', 'E', 'F'].forEach(colL => {
+    ['B','C','D','E','F'].forEach(colL => {
       const cell = ws.getCell(`${colL}${row}`);
       cell.font = { bold: true };
       cell.alignment = { horizontal: 'center' };
@@ -185,40 +194,41 @@ async function buildWorkbook(employeesCalcs) {
     });
     row++;
 
+    // Filas semanales
     weekly
       .sort((a, b) => (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0))
       .forEach(w => {
         ws.getCell(`B${row}`).value = `${w.weekStart} – ${w.weekEnd}`;
 
-        const cWorked = ws.getCell(`C${row}`);
-        cWorked.value = toExcelTime(w.workedDec);
-        cWorked.numFmt = '[h]:mm';
-        cWorked.alignment = { horizontal: 'center' };
+        const cw = ws.getCell(`C${row}`);
+        cw.value = toExcelTime(w.workedDec);
+        cw.numFmt = '[h]:mm';
+        cw.alignment = { horizontal: 'center' };
 
-        const cOT = ws.getCell(`D${row}`);
-        cOT.value = toExcelTime(w.overtimeDec);
-        cOT.numFmt = '[h]:mm';
-        cOT.alignment = { horizontal: 'center' };
+        const ce = ws.getCell(`D${row}`);
+        ce.value = toExcelTime(w.overtimeDec);
+        ce.numFmt = '[h]:mm';
+        ce.alignment = { horizontal: 'center' };
 
-        const cOwed = ws.getCell(`E${row}`);
-        cOwed.value = toExcelTime(w.owedDec);
-        cOwed.numFmt = '[h]:mm';
-        cOwed.alignment = { horizontal: 'center' };
+        const co = ws.getCell(`E${row}`);
+        co.value = toExcelTime(w.owedDec);
+        co.numFmt = '[h]:mm';
+        co.alignment = { horizontal: 'center' };
 
-        const netW = w.overtimeDec - w.owedDec;
-        const cNet = ws.getCell(`F${row}`);
+        const netW = w.overtimeDec - w.owedDec; // == worked - 48
+        const cn = ws.getCell(`F${row}`);
         if (netW >= 0) {
-          cNet.value = toExcelTime(netW);
-          cNet.numFmt = '[h]:mm';
+          cn.value = toExcelTime(netW);
+          cn.numFmt = '[h]:mm';
         } else {
-          cNet.value = decToHHMM(netW);
+          cn.value = decToHHMM(netW);
         }
-        cNet.alignment = { horizontal: 'center' };
+        cn.alignment = { horizontal: 'center' };
 
         row++;
       });
 
-    // Totales semanales
+    // Totales del resumen
     ws.getCell(`B${row}`).value = 'Totales';
     ws.getCell(`B${row}`).font = { bold: true };
 
