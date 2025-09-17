@@ -1,7 +1,8 @@
 // src/services/excel.service.js
 const ExcelJS = require('exceljs');
 const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
-const safeName = (s) => (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
+const safeName = (s) =>
+  (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
 
 async function buildWorkbook(employeesCalcs) {
   const wb = new ExcelJS.Workbook();
@@ -35,7 +36,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B7').font = { bold: true };
 
     let col = 3; // C
-    for (const d of (calc?.days || [])) {
+    for (const d of calc?.days || []) {
       // Fecha en fila 5
       const cDate = ws.getRow(5).getCell(col);
       cDate.value = d?.date ? new Date(d.date + 'T00:00:00') : null;
@@ -43,13 +44,22 @@ async function buildWorkbook(employeesCalcs) {
 
       // Horas trabajadas en fila 6
       const cWorked = ws.getRow(6).getCell(col);
-      cWorked.value = safeNum(d?.worked);
+      const worked = safeNum(d?.worked);
+      cWorked.value = worked;
       cWorked.numFmt = '0.00';
 
       // Horas extras en fila 7
       const cOT = ws.getRow(7).getCell(col);
-      cOT.value = safeNum(d?.overtime);
-      cOT.numFmt = '0.00';
+      const overtime = safeNum(d?.overtime);
+
+      if (overtime > 0) {
+        cOT.value = overtime;
+        cOT.numFmt = '0.00';
+      } else {
+        cOT.value = 'DESCANSO';
+        // opcional: centrado para que se vea prolijo
+        cOT.alignment = { horizontal: 'center' };
+      }
 
       col++;
     }
