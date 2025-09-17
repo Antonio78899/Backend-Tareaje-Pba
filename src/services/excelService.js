@@ -4,6 +4,9 @@ const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 const safeName = (s) =>
   (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
 
+// Convierte horas decimales -> valor de tiempo Excel (días)
+const toExcelTime = (hours) => safeNum(hours) / 24;
+
 async function buildWorkbook(employeesCalcs) {
   const wb = new ExcelJS.Workbook();
   wb.created = new Date();
@@ -25,8 +28,10 @@ async function buildWorkbook(employeesCalcs) {
 
     ws.getCell('B3').value = 'Horas Extras (Total)';
     ws.getCell('B3').font = { bold: true };
-    ws.getCell('C3').value = safeNum(calc?.totalOvertime);
-    ws.getCell('C3').numFmt = '0.00';
+    // totalOvertime en formato tiempo [h]:mm
+    ws.getCell('C3').value = toExcelTime(calc?.totalOvertime);
+    ws.getCell('C3').numFmt = '[h]:mm';
+    ws.getCell('C3').alignment = { horizontal: 'center' };
 
     // Encabezados por día
     ws.getCell('B5').value = ''; // (columna de etiquetas)
@@ -41,14 +46,16 @@ async function buildWorkbook(employeesCalcs) {
       const cDate = ws.getRow(5).getCell(col);
       cDate.value = d?.date ? new Date(d.date + 'T00:00:00') : null;
       if (cDate.value) cDate.numFmt = 'dd/mm/yyyy';
+      cDate.alignment = { horizontal: 'center' };
 
-      // Horas trabajadas en fila 6
+      // Horas trabajadas en fila 6 -> tiempo [h]:mm
       const cWorked = ws.getRow(6).getCell(col);
       const worked = safeNum(d?.worked);
-      cWorked.value = worked;
-      cWorked.numFmt = '0.00';
+      cWorked.value = toExcelTime(worked);
+      cWorked.numFmt = '[h]:mm';
+      cWorked.alignment = { horizontal: 'center' };
 
-      // Horas extras en fila 7
+      // Horas extras en fila 7 -> tiempo [h]:mm o "DESCANSO"
       const cOT = ws.getRow(7).getCell(col);
       const overtime = safeNum(d?.overtime);
 
@@ -57,9 +64,10 @@ async function buildWorkbook(employeesCalcs) {
         cOT.value = 'DESCANSO';
         cOT.alignment = { horizontal: 'center' };
       } else {
-        // Día trabajado: mostrar horas extra numéricas (0.00 si no hay)
-        cOT.value = overtime;
-        cOT.numFmt = '0.00';
+        // Día trabajado: mostrar OT en formato tiempo (0:00 si no hay)
+        cOT.value = toExcelTime(overtime);
+        cOT.numFmt = '[h]:mm';
+        cOT.alignment = { horizontal: 'center' };
       }
 
       col++;
