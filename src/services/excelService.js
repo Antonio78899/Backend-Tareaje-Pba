@@ -1,13 +1,11 @@
-// src/services/excel.service.js
 const ExcelJS = require('exceljs');
 const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 const safeName = (s) =>
   (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
 
-// Convierte horas decimales -> valor de tiempo Excel (días)
+// Horas dec -> valor de tiempo Excel (días)
 const toExcelTime = (hours) => safeNum(hours) / 24;
-
-// Formatea horas decimales a "HH:MM" (para mostrar negativos como texto)
+// Horas dec -> "HH:MM" (para negativos como texto)
 const decToHHMM = (h) => {
   const n = Number(h) || 0;
   const sign = n < 0 ? '-' : '';
@@ -18,7 +16,7 @@ const decToHHMM = (h) => {
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
-// Helpers para semanas (lunes–domingo) sin dayjs
+// Helpers semanas sin dayjs
 const ymd = (d) => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -28,7 +26,7 @@ const ymd = (d) => {
 const mondayOf = (dateStr) => {
   const d = new Date(dateStr + 'T00:00:00');
   const dow = d.getDay(); // 0=Dom,1=Lun,...6=Sab
-  const diffToMonday = (dow + 6) % 7; // Dom(0)->6, Lun(1)->0, ...
+  const diffToMonday = (dow + 6) % 7;
   d.setDate(d.getDate() - diffToMonday);
   return ymd(d);
 };
@@ -45,7 +43,6 @@ async function buildWorkbook(employeesCalcs) {
   for (const item of employeesCalcs || []) {
     const { employee, calc } = item || {};
     const ws = wb.addWorksheet(safeName(employee?.fullName), {
-      // congelamos hasta la fila de fechas
       views: [{ state: 'frozen', xSplit: 2, ySplit: 5 }],
     });
 
@@ -61,7 +58,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B3').font = { bold: true };
 
     // Encabezados por día
-    ws.getCell('B5').value = ''; // (columna de etiquetas para fechas)
+    ws.getCell('B5').value = '';
     ws.getCell('B6').value = 'Horas Trabajadas';
     ws.getCell('B6').font = { bold: true };
     ws.getCell('B7').value = 'Horas Extras';
@@ -69,28 +66,26 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B8').value = 'Horas a Deber';
     ws.getCell('B8').font = { bold: true };
 
-    // Base diaria requerida (fallback 8h) SOLO PARA mostrar “a deber” diario
+    // Base diaria (sólo para owed diario informativo)
     const baseHoursPerDay = Number.isFinite(Number(calc?.baseHoursPerDay))
       ? Number(calc.baseHoursPerDay)
       : 8;
 
-    // ---- Relleno diario (grilla) + acumular EXTRAS (decimales) ----
+    // ---- Grilla diaria + acumular extra diaria ----
     let col = 3; // C
-    let totalOvertimeDec = 0;
     const daysArr = [];
-
     for (const d of (calc?.days || [])) {
       const dateStr = d?.date;
       const worked = safeNum(d?.worked);
       const overtime = safeNum(d?.overtime);
 
-      // Fecha en fila 5
+      // Fecha
       const cDate = ws.getRow(5).getCell(col);
       cDate.value = dateStr ? new Date(dateStr + 'T00:00:00') : null;
       if (cDate.value) cDate.numFmt = 'dd/mm/yyyy';
       cDate.alignment = { horizontal: 'center' };
 
-      // Horas trabajadas en fila 6
+      // Trabajadas
       const cWorked = ws.getRow(6).getCell(col);
       if (worked === 0) {
         cWorked.value = 'DESCANSO';
@@ -101,7 +96,7 @@ async function buildWorkbook(employeesCalcs) {
         cWorked.alignment = { horizontal: 'center' };
       }
 
-      // Horas extras en fila 7
+      // Extras (diarias)
       const cOT = ws.getRow(7).getCell(col);
       if (worked === 0) {
         cOT.value = 'DESCANSO';
@@ -110,10 +105,9 @@ async function buildWorkbook(employeesCalcs) {
         cOT.value = toExcelTime(overtime);
         cOT.numFmt = '[h]:mm';
         cOT.alignment = { horizontal: 'center' };
-        totalOvertimeDec += overtime; // acumula extras solo en días trabajados
       }
 
-      // Horas a Deber en fila 8 (informativo diario)
+      // A deber (diario informativo)
       const cOwed = ws.getRow(8).getCell(col);
       if (worked === 0) {
         cOwed.value = 'DESCANSO';
@@ -129,7 +123,7 @@ async function buildWorkbook(employeesCalcs) {
       col++;
     }
 
-    // ---- Regla semanal 48h: agrupar lunes–domingo y calcular deuda ----
+    // ---- Resumen semanal con BONO +8h si NO hay descansos ----
     const weeksMap = new Map();
     for (const d of daysArr) {
       const wk = mondayOf(d.date);
@@ -137,46 +131,54 @@ async function buildWorkbook(employeesCalcs) {
       weeksMap.get(wk).push(d);
     }
 
-    const WEEK_TARGET = 48; // horas
+    const WEEK_TARGET = 48;
+    let sumWorked = 0, sumExtra = 0, sumOwed = 0, sumNet = 0;
     const weekly = [];
-    let totalOwedWeeklyDec = 0;
 
     for (const [weekStart, arr] of weeksMap.entries()) {
       arr.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
       const workedSum = arr.reduce((acc, x) => acc + safeNum(x.worked), 0);
-      const overtimeSum = arr.reduce((acc, x) => acc + safeNum(x.overtime), 0);
+      const overtimeSumDaily = arr.reduce((acc, x) => acc + safeNum(x.overtime), 0);
+
+      const hasRest = arr.some(x => safeNum(x.worked) === 0);
+      const bonusExtra = hasRest ? 0 : 8;                 // <-- REGLA NUEVA
+      const overtimeWeek = overtimeSumDaily + bonusExtra; // <-- extra semanal ajustada
+
       const owedWeek = Math.max(0, WEEK_TARGET - workedSum);
+      const netW = overtimeWeek - owedWeek;
 
       weekly.push({
         weekStart,
         weekEnd: addDays(weekStart, 6),
         workedDec: workedSum,
-        overtimeDec: overtimeSum,
+        overtimeDec: overtimeWeek,
         owedDec: owedWeek,
       });
 
-      totalOwedWeeklyDec += owedWeek;
+      sumWorked += workedSum;
+      sumExtra  += overtimeWeek;
+      sumOwed   += owedWeek;
+      sumNet    += netW;
     }
 
-    // ---- Total Neto (Extras - Deber semanal 48h) en C3 ----
-    const netDec = totalOvertimeDec - totalOwedWeeklyDec;
+    // ---- Total Neto (Extras - Deber) en C3 (con bono aplicado) ----
     const cTotal = ws.getCell('C3');
-    if (netDec >= 0) {
-      cTotal.value = toExcelTime(netDec);
+    if (sumNet >= 0) {
+      cTotal.value = toExcelTime(sumNet);
       cTotal.numFmt = '[h]:mm';
       cTotal.alignment = { horizontal: 'center' };
     } else {
-      cTotal.value = decToHHMM(netDec); // texto para negativos
+      cTotal.value = decToHHMM(sumNet); // texto si negativo
       cTotal.alignment = { horizontal: 'center' };
     }
 
-    // ---- Resumen semanal (tabla debajo) ----
-    let row = 10; // inicio del bloque
+    // ---- Tabla Resumen semanal (meta 48h) ----
+    let row = 10;
     ws.getCell(`B${row}`).value = 'Resumen semanal (meta 48 h)';
     ws.getCell(`B${row}`).font = { bold: true };
     row++;
 
-    // encabezados
     ws.getCell(`B${row}`).value = 'Semana';
     ws.getCell(`C${row}`).value = 'Trabajadas';
     ws.getCell(`D${row}`).value = 'Horas extra';
@@ -190,13 +192,10 @@ async function buildWorkbook(employeesCalcs) {
     });
     row++;
 
-    // filas semanales
-    let sumWorked = 0, sumOT = 0, sumOwed = 0, sumNet = 0;
     weekly
-      .sort((a, b) => (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0))
+      .sort((a,b) => (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0))
       .forEach(w => {
-        const label = `${w.weekStart} – ${w.weekEnd}`;
-        ws.getCell(`B${row}`).value = label;
+        ws.getCell(`B${row}`).value = `${w.weekStart} – ${w.weekEnd}`;
 
         const cWorked = ws.getCell(`C${row}`);
         cWorked.value = toExcelTime(w.workedDec);
@@ -219,19 +218,14 @@ async function buildWorkbook(employeesCalcs) {
           cNet.value = toExcelTime(netW);
           cNet.numFmt = '[h]:mm';
         } else {
-          cNet.value = decToHHMM(netW); // texto para negativos
+          cNet.value = decToHHMM(netW);
         }
         cNet.alignment = { horizontal: 'center' };
-
-        sumWorked += w.workedDec;
-        sumOT += w.overtimeDec;
-        sumOwed += w.owedDec;
-        sumNet += netW;
 
         row++;
       });
 
-    // fila de totales semanales
+    // Totales semanales
     ws.getCell(`B${row}`).value = 'Totales';
     ws.getCell(`B${row}`).font = { bold: true };
 
@@ -242,7 +236,7 @@ async function buildWorkbook(employeesCalcs) {
     cWorkTot.font = { bold: true };
 
     const cOTTot = ws.getCell(`D${row}`);
-    cOTTot.value = toExcelTime(sumOT);
+    cOTTot.value = toExcelTime(sumExtra);
     cOTTot.numFmt = '[h]:mm';
     cOTTot.alignment = { horizontal: 'center' };
     cOTTot.font = { bold: true };
