@@ -36,7 +36,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B7').font = { bold: true };
 
     let col = 3; // C
-    for (const d of calc?.days || []) {
+    for (const d of (calc?.days || [])) {
       // Fecha en fila 5
       const cDate = ws.getRow(5).getCell(col);
       cDate.value = d?.date ? new Date(d.date + 'T00:00:00') : null;
@@ -52,13 +52,14 @@ async function buildWorkbook(employeesCalcs) {
       const cOT = ws.getRow(7).getCell(col);
       const overtime = safeNum(d?.overtime);
 
-      if (overtime > 0) {
+      if (worked === 0) {
+        // Día del rango sin ninguna hora trabajada -> "DESCANSO"
+        cOT.value = 'DESCANSO';
+        cOT.alignment = { horizontal: 'center' };
+      } else {
+        // Día trabajado: mostrar horas extra numéricas (0.00 si no hay)
         cOT.value = overtime;
         cOT.numFmt = '0.00';
-      } else {
-        cOT.value = 'DESCANSO';
-        // opcional: centrado para que se vea prolijo
-        cOT.alignment = { horizontal: 'center' };
       }
 
       col++;
