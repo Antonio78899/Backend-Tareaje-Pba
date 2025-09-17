@@ -12,15 +12,15 @@ const normalizeSessions = (rows = []) =>
     employeeId: r.employeeId,
     workDate: toYMD(r.workDate),
     startTime: String(r.startTime || '').trim(),
-    endTime:   String(r.endTime   || '').trim(),
-    hadLunch:  !!r.hadLunch,
+    endTime: String(r.endTime || '').trim(),
+    hadLunch: !!r.hadLunch,
     lunchMinutes: r.lunchMinutes
   }));
 
 // ---- Helpers rango [from,to] ----
 const eachDateYMD = (from, to) => {
   const start = dayjs(from).startOf('day');
-  const end   = dayjs(to).startOf('day');
+  const end = dayjs(to).startOf('day');
   const days = [];
   for (let d = start; !d.isAfter(end); d = d.add(1, 'day')) {
     days.push(d.format('YYYY-MM-DD'));
@@ -52,7 +52,7 @@ const decToHHMM = (hDec) => {
   const hh = Math.floor(abs);
   let mm = Math.round((abs - hh) * 60);
   if (mm === 60) { mm = 0; abs = hh + 1; }
-  return `${sign}${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+  return `${sign}${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 };
 
 async function preview(req, res) {
@@ -82,7 +82,7 @@ async function preview(req, res) {
         const worked = Number(d?.worked) || 0;
         const overtime = Number(d?.overtime) || 0;
 
-        const workedDisplay   = worked === 0 ? 'DESCANSO' : decToHHMM(worked);
+        const workedDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(worked);
         const overtimeDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(overtime);
 
         const owedDay = (worked > 0 && worked < base) ? (base - worked) : 0;
@@ -101,7 +101,7 @@ async function preview(req, res) {
         };
       });
 
-      // ---- Resumen semanal con BONO +8h si NO hay descansos ----
+      // ---- Agrupar por semana (lunes–domingo) y calcular sobre 48h ----
       const weeksMap = new Map();
       for (const d of days) {
         const wk = mondayOf(d.date);
@@ -109,42 +109,37 @@ async function preview(req, res) {
         weeksMap.get(wk).push(d);
       }
 
-      const WEEK_TARGET = 48;
+      const WEEK_TARGET = 48; // horas
       const weekly = [];
-      let totalOvertimeWeeklyDec = 0; // suma de (extra diaria + bono si aplica)
+      let totalExtraWeeklyDec = 0;
       let totalOwedWeeklyDec = 0;
 
       for (const [weekStart, arr] of weeksMap.entries()) {
-        arr.sort((a,b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        arr.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-        const workedSum = arr.reduce((acc, x) => acc + (x.worked || 0), 0);
-        const overtimeSumDaily = arr.reduce((acc, x) => acc + (x.overtime || 0), 0);
+        const workedSum = arr.reduce((acc, x) => acc + (Number(x.worked) || 0), 0);
 
-        const hasRest = arr.some(x => (x.worked || 0) === 0);
-        const bonusExtra = hasRest ? 0 : 8;                 // <-- REGLA NUEVA
-        const overtimeWeek = overtimeSumDaily + bonusExtra; // <-- extra semanal ajustada
-
-        const owedWeek = Math.max(0, WEEK_TARGET - workedSum);
+        // NUEVA DEFINICIÓN
+        const extraWeek = Math.max(0, workedSum - WEEK_TARGET); // >48h
+        const owedWeek = Math.max(0, WEEK_TARGET - workedSum); // <48h
 
         weekly.push({
           weekStart,
-          weekEnd: dayjs(weekStart).add(6,'day').format('YYYY-MM-DD'),
+          weekEnd: dayjs(weekStart).add(6, 'day').format('YYYY-MM-DD'),
           workedDec: workedSum,
-          overtimeDec: overtimeWeek,
+          overtimeDec: extraWeek,
           owedDec: owedWeek,
           worked: decToHHMM(workedSum),
-          overtime: decToHHMM(overtimeWeek),
+          overtime: decToHHMM(extraWeek),
           owed: decToHHMM(owedWeek),
-          net: decToHHMM(overtimeWeek - owedWeek),
-          meta48_hasRest: hasRest ? 'sí' : 'no',           // opcional útil para debug
-          meta48_bonusExtra: decToHHMM(bonusExtra),         // opcional
+          net: decToHHMM(extraWeek - owedWeek), // == workedSum - 48
         });
 
-        totalOvertimeWeeklyDec += overtimeWeek;
+        totalExtraWeeklyDec += extraWeek;
         totalOwedWeeklyDec += owedWeek;
       }
 
-      const totalNetDec = totalOvertimeWeeklyDec - totalOwedWeeklyDec;
+      const totalNetDec = totalExtraWeeklyDec - totalOwedWeeklyDec;
 
       const calc = {
         ...calcFilled,
@@ -152,10 +147,10 @@ async function preview(req, res) {
         days,
         weekly,
         totals: {
-          totalOvertimeDec: totalOvertimeWeeklyDec,
+          totalOvertimeDec: totalExtraWeeklyDec,
           totalOwedDec: totalOwedWeeklyDec,
           totalNetDec,
-          totalOvertime: decToHHMM(totalOvertimeWeeklyDec),
+          totalOvertime: decToHHMM(totalExtraWeeklyDec),
           totalOwed: decToHHMM(totalOwedWeeklyDec),
           totalNet: decToHHMM(totalNetDec),
         },
@@ -187,8 +182,8 @@ async function excel(req, res) {
     }
 
     const wb = await buildWorkbook(blocks);
-    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition','attachment; filename="horas_overtime.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="horas_overtime.xlsx"');
     await wb.xlsx.write(res);
     res.end();
   } catch (e) {

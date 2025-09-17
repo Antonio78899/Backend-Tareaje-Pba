@@ -123,7 +123,7 @@ async function buildWorkbook(employeesCalcs) {
       col++;
     }
 
-    // ---- Resumen semanal con BONO +8h si NO hay descansos ----
+    // ---- Resumen semanal: extra >48h, deuda <48h ----
     const weeksMap = new Map();
     for (const d of daysArr) {
       const wk = mondayOf(d.date);
@@ -139,52 +139,45 @@ async function buildWorkbook(employeesCalcs) {
       arr.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
       const workedSum = arr.reduce((acc, x) => acc + safeNum(x.worked), 0);
-      const overtimeSumDaily = arr.reduce((acc, x) => acc + safeNum(x.overtime), 0);
 
-      const hasRest = arr.some(x => safeNum(x.worked) === 0);
-      const bonusExtra = hasRest ? 0 : 8;                 // <-- REGLA NUEVA
-      const overtimeWeek = overtimeSumDaily + bonusExtra; // <-- extra semanal ajustada
-
+      // NUEVA DEFINICIÓN
+      const extraWeek = Math.max(0, workedSum - WEEK_TARGET);
       const owedWeek = Math.max(0, WEEK_TARGET - workedSum);
-      const netW = overtimeWeek - owedWeek;
+      const netW = extraWeek - owedWeek; // == workedSum - 48
 
       weekly.push({
         weekStart,
         weekEnd: addDays(weekStart, 6),
         workedDec: workedSum,
-        overtimeDec: overtimeWeek,
+        overtimeDec: extraWeek,
         owedDec: owedWeek,
       });
 
       sumWorked += workedSum;
-      sumExtra  += overtimeWeek;
-      sumOwed   += owedWeek;
-      sumNet    += netW;
+      sumExtra += extraWeek;
+      sumOwed += owedWeek;
+      sumNet += netW;
     }
 
-    // ---- Total Neto (Extras - Deber) en C3 (con bono aplicado) ----
+    // ---- Total Neto (Extras - Deber) en C3 ----
     const cTotal = ws.getCell('C3');
     if (sumNet >= 0) {
       cTotal.value = toExcelTime(sumNet);
       cTotal.numFmt = '[h]:mm';
-      cTotal.alignment = { horizontal: 'center' };
     } else {
-      cTotal.value = decToHHMM(sumNet); // texto si negativo
-      cTotal.alignment = { horizontal: 'center' };
+      cTotal.value = decToHHMM(sumNet); // mostrar negativo como texto
     }
+    cTotal.alignment = { horizontal: 'center' };
 
-    // ---- Tabla Resumen semanal (meta 48h) ----
-    let row = 10;
+    // ---- Encabezados del resumen (opcional: renombrar para que quede claro) ----
     ws.getCell(`B${row}`).value = 'Resumen semanal (meta 48 h)';
-    ws.getCell(`B${row}`).font = { bold: true };
     row++;
-
     ws.getCell(`B${row}`).value = 'Semana';
     ws.getCell(`C${row}`).value = 'Trabajadas';
-    ws.getCell(`D${row}`).value = 'Horas extra';
-    ws.getCell(`E${row}`).value = 'Horas a deber (48h)';
+    ws.getCell(`D${row}`).value = 'Horas extra (>48h)';   // <-- renombrado sugerido
+    ws.getCell(`E${row}`).value = 'Horas a deber (48h)';  // igual
     ws.getCell(`F${row}`).value = 'Neto (Extra - Deber)';
-    ['B','C','D','E','F'].forEach(colL => {
+    ['B', 'C', 'D', 'E', 'F'].forEach(colL => {
       const cell = ws.getCell(`${colL}${row}`);
       cell.font = { bold: true };
       cell.alignment = { horizontal: 'center' };
@@ -193,7 +186,7 @@ async function buildWorkbook(employeesCalcs) {
     row++;
 
     weekly
-      .sort((a,b) => (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0))
+      .sort((a, b) => (a.weekStart < b.weekStart ? -1 : a.weekStart > b.weekStart ? 1 : 0))
       .forEach(w => {
         ws.getCell(`B${row}`).value = `${w.weekStart} – ${w.weekEnd}`;
 
