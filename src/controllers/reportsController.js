@@ -18,7 +18,7 @@ const normalizeSessions = (rows = []) =>
     lunchMinutes: r.lunchMinutes
   }));
 
-// ---------- Helpers ----------
+// ---- Helpers para rellenar días del rango [from, to] ----
 const eachDateYMD = (from, to) => {
   const start = dayjs(from).startOf('day');
   const end   = dayjs(to).startOf('day');
@@ -37,7 +37,15 @@ const fillMissingDays = (calc = {}, from, to) => {
   return { ...calc, days: filledDays };
 };
 
-// Formatea horas decimales a "HH:MM" (sin límite de 24h). Negativos con prefijo '-'.
+// ---- Semanas lunes–domingo sin plugins ----
+const mondayOf = (dateStr) => {
+  const d = dayjs(dateStr);
+  const dow = d.day(); // 0=Dom,1=Lun,...6=Sab
+  const diffToMonday = (dow + 6) % 7; // Dom(0)->6, Lun(1)->0, ...
+  return d.subtract(diffToMonday, 'day').format('YYYY-MM-DD');
+};
+
+// HH:MM (acepta negativos con prefijo "-")
 const decToHHMM = (hDec) => {
   if (hDec == null || isNaN(hDec)) return '00:00';
   const sign = hDec < 0 ? '-' : '';
@@ -47,7 +55,6 @@ const decToHHMM = (hDec) => {
   if (mm === 60) { mm = 0; abs = hh + 1; }
   return `${sign}${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
 };
-// -----------------------------
 
 async function preview(req, res) {
   try {
@@ -66,66 +73,89 @@ async function preview(req, res) {
       // rellenamos días faltantes del rango
       const calcFilled = fillMissingDays(calcBase, from, to);
 
-      // base diaria (prioriza lo devuelto por compute; luego request; luego 8)
+      // base diaria (para owed diario informativo)
       const base = Number.isFinite(Number(calcFilled?.baseHoursPerDay))
         ? Number(calcFilled.baseHoursPerDay)
         : (Number.isFinite(Number(baseHoursPerDay)) ? Number(baseHoursPerDay) : 8);
 
+      // Enriquecimiento diario (visual) y acumulación de extras
       let totalOvertimeDec = 0;
-      let totalOwedDec = 0;
 
-      // enriquecemos cada día con displays y horas a deber
       const days = (calcFilled.days || []).map(d => {
-        const worked = Number.isFinite(Number(d?.worked)) ? Number(d.worked) : 0;
-        const overtime = Number.isFinite(Number(d?.overtime)) ? Number(d.overtime) : 0;
+        const worked = Number(d?.worked) || 0;
+        const overtime = Number(d?.overtime) || 0;
 
-        let workedDisplay, overtimeDisplay, owedDec = 0, owedDisplay;
+        // Displays diarios (mantienen "DESCANSO" como acordamos)
+        const workedDisplay   = worked === 0 ? 'DESCANSO' : decToHHMM(worked);
+        const overtimeDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(overtime);
 
-        if (worked === 0) {
-          // Día de descanso: mostrar DESCANSO en las tres filas
-          workedDisplay = 'DESCANSO';
-          overtimeDisplay = 'DESCANSO';
-          owedDisplay = 'DESCANSO';
-        } else {
-          workedDisplay = decToHHMM(worked);
-          overtimeDisplay = decToHHMM(overtime);
+        // Owed diario informativo (cuando trabajó menos que la base)
+        const owedDay = (worked > 0 && worked < base) ? (base - worked) : 0;
+        const owedDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(owedDay);
 
-          if (worked < base) {
-            owedDec = base - worked;
-            totalOwedDec += owedDec;
-          }
-          owedDisplay = decToHHMM(owedDec);
-
-          totalOvertimeDec += overtime;
-        }
+        totalOvertimeDec += overtime;
 
         return {
           ...d,
-          // mantenemos numéricos originales
           worked,
           overtime,
-          // agregamos horas a deber numéricas
-          owed: owedDec,
-          // y versiones para mostrar
+          owed: owedDay,           // num (sólo informativo diario)
           workedDisplay,
           overtimeDisplay,
           owedDisplay,
         };
       });
 
-      const netDec = totalOvertimeDec - totalOwedDec;
+      // ---- Agrupar por semana (lunes–domingo) y calcular deuda semanal 48h ----
+      const weeksMap = new Map();
+      for (const d of days) {
+        const wk = mondayOf(d.date);
+        if (!weeksMap.has(wk)) weeksMap.set(wk, []);
+        weeksMap.get(wk).push(d);
+      }
+
+      const WEEK_TARGET = 48; // horas
+      const weekly = [];
+      let totalOwedWeeklyDec = 0;
+
+      for (const [weekStart, arr] of weeksMap.entries()) {
+        // ordenar por fecha por si acaso
+        arr.sort((a,b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+        const workedSum = arr.reduce((acc, x) => acc + (Number(x.worked) || 0), 0);
+        const overtimeSum = arr.reduce((acc, x) => acc + (Number(x.overtime) || 0), 0);
+        const owedWeek = Math.max(0, WEEK_TARGET - workedSum);
+
+        weekly.push({
+          weekStart,
+          weekEnd: dayjs(weekStart).add(6,'day').format('YYYY-MM-DD'),
+          workedDec: workedSum,
+          overtimeDec: overtimeSum,
+          owedDec: owedWeek,
+          worked: decToHHMM(workedSum),
+          overtime: decToHHMM(overtimeSum),
+          owed: decToHHMM(owedWeek),
+          net: decToHHMM(overtimeSum - owedWeek),
+        });
+
+        totalOwedWeeklyDec += owedWeek;
+      }
+
+      // Totales del bloque usando la REGLA SEMANAL
+      const totalNetDec = totalOvertimeDec - totalOwedWeeklyDec;
 
       const calc = {
         ...calcFilled,
         baseHoursPerDay: base,
         days,
+        weekly, // <- resumen por semana (trabajadas, extras, a deber, neto)
         totals: {
-          totalOvertimeDec,
-          totalOwedDec,
-          totalNetDec: netDec,
+          totalOvertimeDec: totalOvertimeDec,
+          totalOwedDec: totalOwedWeeklyDec,  // ¡usa 48h/semana!
+          totalNetDec,
           totalOvertime: decToHHMM(totalOvertimeDec),
-          totalOwed: decToHHMM(totalOwedDec),
-          totalNet: netDec >= 0 ? decToHHMM(netDec) : decToHHMM(netDec), // ya trae '-'
+          totalOwed: decToHHMM(totalOwedWeeklyDec),
+          totalNet: decToHHMM(totalNetDec), // con signo si negativo
         },
       };
 
