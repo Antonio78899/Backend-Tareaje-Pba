@@ -7,6 +7,19 @@ const safeName = (s) =>
 // Convierte horas decimales -> valor de tiempo Excel (días)
 const toExcelTime = (hours) => safeNum(hours) / 24;
 
+// Formatea horas decimales a "HH:MM" (para mostrar negativos como texto)
+const decToHHMM = (h) => {
+  const sign = h < 0 ? '-' : '';
+  let abs = Math.abs(h);
+  const hours = Math.floor(abs);
+  let minutes = Math.round((abs - hours) * 60);
+  if (minutes === 60) { // corrección por redondeo
+    minutes = 0;
+    abs = hours + 1;
+  }
+  return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
+
 async function buildWorkbook(employeesCalcs) {
   const wb = new ExcelJS.Workbook();
   wb.created = new Date();
@@ -26,11 +39,9 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B2').font = { bold: true };
     ws.getCell('C2').value = employee?.fullName || '';
 
-    ws.getCell('B3').value = 'Horas Extras (Total)';
+    // Etiqueta de total NETO
+    ws.getCell('B3').value = 'Total Neto (Extras - Deber)';
     ws.getCell('B3').font = { bold: true };
-    ws.getCell('C3').value = toExcelTime(calc?.totalOvertime);
-    ws.getCell('C3').numFmt = '[h]:mm';
-    ws.getCell('C3').alignment = { horizontal: 'center' };
 
     // Encabezados por día
     ws.getCell('B5').value = ''; // (columna de etiquetas para fechas)
@@ -46,6 +57,10 @@ async function buildWorkbook(employeesCalcs) {
       ? Number(calc.baseHoursPerDay)
       : 8;
 
+    // Acumuladores para total neto
+    let totalOvertimeDec = 0; // horas decimales
+    let totalOwedDec = 0;     // horas decimales
+
     let col = 3; // C
     for (const d of (calc?.days || [])) {
       // Fecha en fila 5
@@ -54,39 +69,64 @@ async function buildWorkbook(employeesCalcs) {
       if (cDate.value) cDate.numFmt = 'dd/mm/yyyy';
       cDate.alignment = { horizontal: 'center' };
 
-      // Horas trabajadas en fila 6 -> tiempo [h]:mm
-      const cWorked = ws.getRow(6).getCell(col);
       const worked = safeNum(d?.worked);
-      cWorked.value = toExcelTime(worked);
-      cWorked.numFmt = '[h]:mm';
-      cWorked.alignment = { horizontal: 'center' };
-
-      // Horas extras en fila 7 -> tiempo [h]:mm o "DESCANSO"
-      const cOT = ws.getRow(7).getCell(col);
       const overtime = safeNum(d?.overtime);
 
+      // ---- Horas Trabajadas (fila 6) ----
+      const cWorked = ws.getRow(6).getCell(col);
       if (worked === 0) {
-        // Día del rango sin ninguna hora trabajada -> "DESCANSO"
+        cWorked.value = 'DESCANSO';
+        cWorked.alignment = { horizontal: 'center' };
+      } else {
+        cWorked.value = toExcelTime(worked);
+        cWorked.numFmt = '[h]:mm';
+        cWorked.alignment = { horizontal: 'center' };
+      }
+
+      // ---- Horas Extras (fila 7) ----
+      const cOT = ws.getRow(7).getCell(col);
+      if (worked === 0) {
+        // Día sin trabajar: también DESCANSO en OT
         cOT.value = 'DESCANSO';
         cOT.alignment = { horizontal: 'center' };
       } else {
-        // Día trabajado: mostrar OT en formato tiempo (0:00 si no hay)
         cOT.value = toExcelTime(overtime);
         cOT.numFmt = '[h]:mm';
         cOT.alignment = { horizontal: 'center' };
+        totalOvertimeDec += overtime; // acumula extras solo en días trabajados
       }
 
-      // Horas a Deber en fila 8 -> si trabajó menos que la base y trabajó algo
+      // ---- Horas a Deber (fila 8) ----
       const cOwed = ws.getRow(8).getCell(col);
-      let owed = 0;
-      if (worked > 0 && worked < baseHoursPerDay) {
-        owed = baseHoursPerDay - worked; // horas decimales
+      if (worked === 0) {
+        // Requisito: mostrar "DESCANSO" también aquí
+        cOwed.value = 'DESCANSO';
+        cOwed.alignment = { horizontal: 'center' };
+      } else {
+        let owed = 0;
+        if (worked < baseHoursPerDay) {
+          owed = baseHoursPerDay - worked; // horas decimales
+          totalOwedDec += owed;
+        }
+        cOwed.value = toExcelTime(owed);
+        cOwed.numFmt = '[h]:mm';
+        cOwed.alignment = { horizontal: 'center' };
       }
-      cOwed.value = toExcelTime(owed);
-      cOwed.numFmt = '[h]:mm';
-      cOwed.alignment = { horizontal: 'center' };
 
       col++;
+    }
+
+    // ----- Total Neto (Extras - Deber) en C3 -----
+    const net = totalOvertimeDec - totalOwedDec;
+    const cTotal = ws.getCell('C3');
+    if (net >= 0) {
+      cTotal.value = toExcelTime(net);
+      cTotal.numFmt = '[h]:mm';
+      cTotal.alignment = { horizontal: 'center' };
+    } else {
+      // Excel no muestra tiempos negativos con [h]:mm → lo mostramos como texto "-HH:MM"
+      cTotal.value = decToHHMM(net);
+      cTotal.alignment = { horizontal: 'center' };
     }
   }
 
