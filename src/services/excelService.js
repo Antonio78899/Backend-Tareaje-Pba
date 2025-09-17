@@ -28,17 +28,23 @@ async function buildWorkbook(employeesCalcs) {
 
     ws.getCell('B3').value = 'Horas Extras (Total)';
     ws.getCell('B3').font = { bold: true };
-    // totalOvertime en formato tiempo [h]:mm
     ws.getCell('C3').value = toExcelTime(calc?.totalOvertime);
     ws.getCell('C3').numFmt = '[h]:mm';
     ws.getCell('C3').alignment = { horizontal: 'center' };
 
     // Encabezados por día
-    ws.getCell('B5').value = ''; // (columna de etiquetas)
+    ws.getCell('B5').value = ''; // (columna de etiquetas para fechas)
     ws.getCell('B6').value = 'Horas Trabajadas';
     ws.getCell('B6').font = { bold: true };
     ws.getCell('B7').value = 'Horas Extras';
     ws.getCell('B7').font = { bold: true };
+    ws.getCell('B8').value = 'Horas a Deber';
+    ws.getCell('B8').font = { bold: true };
+
+    // Base diaria requerida (fallback 8h)
+    const baseHoursPerDay = Number.isFinite(Number(calc?.baseHoursPerDay))
+      ? Number(calc.baseHoursPerDay)
+      : 8;
 
     let col = 3; // C
     for (const d of (calc?.days || [])) {
@@ -69,6 +75,16 @@ async function buildWorkbook(employeesCalcs) {
         cOT.numFmt = '[h]:mm';
         cOT.alignment = { horizontal: 'center' };
       }
+
+      // Horas a Deber en fila 8 -> si trabajó menos que la base y trabajó algo
+      const cOwed = ws.getRow(8).getCell(col);
+      let owed = 0;
+      if (worked > 0 && worked < baseHoursPerDay) {
+        owed = baseHoursPerDay - worked; // horas decimales
+      }
+      cOwed.value = toExcelTime(owed);
+      cOwed.numFmt = '[h]:mm';
+      cOwed.alignment = { horizontal: 'center' };
 
       col++;
     }
