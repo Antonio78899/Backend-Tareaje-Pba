@@ -5,7 +5,7 @@ const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
 const safeName = (s) =>
   (s || 'Empleado').replace(/[\\/?*[\]:]/g, ' ').slice(0, 31).trim() || 'Empleado';
 
-// Convierte horas decimales -> valor de tiempo Excel (fracción de día)
+// Convierte horas decimales -> fracción de día (Excel)
 const toExcelTime = (hours) => safeNum(hours) / 24;
 
 // Formatea horas decimales como "HH:MM" (para negativos como texto)
@@ -15,7 +15,7 @@ const decToHHMM = (h) => {
   let abs = Math.abs(n);
   const hours = Math.floor(abs);
   let minutes = Math.round((abs - hours) * 60);
-  if (minutes === 60) { minutes = 0; abs = hours + 1; }
+  if (minutes === 60) { minutes = 0; }
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
@@ -46,7 +46,6 @@ async function buildWorkbook(employeesCalcs) {
   for (const item of employeesCalcs || []) {
     const { employee, calc } = item || {};
     const ws = wb.addWorksheet(safeName(employee?.fullName), {
-      // congelamos hasta la fila de fechas
       views: [{ state: 'frozen', xSplit: 2, ySplit: 5 }],
     });
 
@@ -112,7 +111,7 @@ async function buildWorkbook(employeesCalcs) {
         cOT.alignment = { horizontal: 'center' };
       }
 
-      // Horas a deber (diarias, informativo) (fila 8)
+      // Horas a Deber (diarias, informativo) (fila 8)
       const cOwed = ws.getRow(8).getCell(col);
       if (worked === 0) {
         cOwed.value = 'DESCANSO';
@@ -128,27 +127,44 @@ async function buildWorkbook(employeesCalcs) {
       col++;
     }
 
-    // ---- Resumen semanal: Extra (>48h) y Deuda (<48h)
+    // ---- Resumen semanal con regla especial para última semana parcial
+    // Agrupar días por lunes de la semana
     const weeksMap = new Map();
     for (const d of daysArr) {
       const wk = mondayOf(d.date);
       if (!weeksMap.has(wk)) weeksMap.set(wk, []);
       weeksMap.get(wk).push(d);
     }
+    // Detectar la última semana del rango (mayor weekStart)
+    const weekStarts = Array.from(weeksMap.keys()).sort();
+    const lastWeekStart = weekStarts[weekStarts.length - 1];
 
     const WEEK_TARGET = 48;
     let sumWorked = 0, sumExtra = 0, sumOwed = 0, sumNet = 0;
     const weekly = [];
 
-    for (const [weekStart, arr] of weeksMap.entries()) {
-      arr.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-
+    for (const weekStart of weekStarts) {
+      const arr = weeksMap.get(weekStart).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
       const workedSum = arr.reduce((acc, x) => acc + safeNum(x.worked), 0);
 
-      // NUEVA definición: extra sobre 48h, deuda por debajo de 48h
-      const extraWeek = Math.max(0, workedSum - WEEK_TARGET);
-      const owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
-      const netW = extraWeek - owedWeek; // == workedSum - 48
+      // ¿Semana completa? (7 días dentro del rango) — si NO y es la última semana, usar regla diaria
+      const isFullWeek = arr.length === 7;
+      const isLastWeek = weekStart === lastWeekStart;
+
+      let extraWeek = 0;
+      let owedWeek = 0;
+
+      if (isLastWeek && !isFullWeek) {
+        // ---- Última semana parcial: suma por día vs base 8h
+        extraWeek = arr.reduce((acc, x) => acc + Math.max(0, safeNum(x.worked) - baseHoursPerDay), 0);
+        owedWeek  = arr.reduce((acc, x) => acc + Math.max(0, baseHoursPerDay - safeNum(x.worked)), 0);
+      } else {
+        // ---- Semanas completas (o cualquier otra que no sea la última parcial): regla 48h
+        extraWeek = Math.max(0, workedSum - WEEK_TARGET);
+        owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
+      }
+
+      const netW = extraWeek - owedWeek;
 
       weekly.push({
         weekStart,
@@ -174,7 +190,7 @@ async function buildWorkbook(employeesCalcs) {
     }
     cTotal.alignment = { horizontal: 'center' };
 
-    // ---- Resumen semanal (meta 48h)
+    // ---- Resumen semanal (meta 48h con regla de última semana parcial)
     let row = 10;
     ws.getCell(`B${row}`).value = 'Resumen semanal (meta 48 h)';
     ws.getCell(`B${row}`).font = { bold: true };
@@ -183,7 +199,7 @@ async function buildWorkbook(employeesCalcs) {
     // Encabezados
     ws.getCell(`B${row}`).value = 'Semana';
     ws.getCell(`C${row}`).value = 'Trabajadas';
-    ws.getCell(`D${row}`).value = 'Horas extra (>48h)';   // renombrado claro
+    ws.getCell(`D${row}`).value = 'Horas extra';
     ws.getCell(`E${row}`).value = 'Horas a deber (48h)';
     ws.getCell(`F${row}`).value = 'Neto (Extra - Deber)';
     ['B','C','D','E','F'].forEach(colL => {
@@ -215,7 +231,7 @@ async function buildWorkbook(employeesCalcs) {
         co.numFmt = '[h]:mm';
         co.alignment = { horizontal: 'center' };
 
-        const netW = w.overtimeDec - w.owedDec; // == worked - 48
+        const netW = w.overtimeDec - w.owedDec; // == según regla aplicada
         const cn = ws.getCell(`F${row}`);
         if (netW >= 0) {
           cn.value = toExcelTime(netW);
