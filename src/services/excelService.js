@@ -19,7 +19,7 @@ const decToHHMM = (h) => {
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
-// ---- Helpers para semanas (lunes–domingo) sin libs externas ----
+// ---- Helpers (lunes–domingo)
 const ymd = (d) => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -38,6 +38,8 @@ const addDays = (dateStr, n) => {
   d.setDate(d.getDate() + n);
   return ymd(d);
 };
+const minDate = (a, b) => (a < b ? a : b);
+const maxDate = (a, b) => (a > b ? a : b);
 
 async function buildWorkbook(employeesCalcs) {
   const wb = new ExcelJS.Workbook();
@@ -61,7 +63,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B3').font = { bold: true };
 
     // Encabezados por día
-    ws.getCell('B5').value = ''; // columna de etiquetas
+    ws.getCell('B5').value = '';
     ws.getCell('B6').value = 'Horas Trabajadas';
     ws.getCell('B6').font = { bold: true };
     ws.getCell('B7').value = 'Horas Extras';
@@ -69,10 +71,14 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B8').value = 'Horas a Deber';
     ws.getCell('B8').font = { bold: true };
 
-    // Base diaria requerida (solo para “a deber” diario informativo)
+    // Base diaria requerida (usada también para "a deber" diario)
     const baseHoursPerDay = Number.isFinite(Number(calc?.baseHoursPerDay))
       ? Number(calc.baseHoursPerDay)
       : 8;
+
+    // Determinar rango declarado por computeFromSessions
+    const rangeStart = calc?.rangeStart || (calc?.days?.[0]?.date ?? null);
+    const rangeEnd   = calc?.rangeEnd   || (calc?.days?.[calc?.days?.length - 1]?.date ?? null);
 
     // ---- Grilla diaria
     let col = 3; // C
@@ -100,7 +106,7 @@ async function buildWorkbook(employeesCalcs) {
         cWorked.alignment = { horizontal: 'center' };
       }
 
-      // Horas extras (diarias) (fila 7)
+      // Horas extras (fila 7)
       const cOT = ws.getRow(7).getCell(col);
       if (worked === 0) {
         cOT.value = 'DESCANSO';
@@ -111,67 +117,80 @@ async function buildWorkbook(employeesCalcs) {
         cOT.alignment = { horizontal: 'center' };
       }
 
-      // Horas a Deber (diarias, informativo) (fila 8)
+      // Horas a Deber (fila 8): si no trabajó, se deben 8 h
       const cOwed = ws.getRow(8).getCell(col);
-      if (worked === 0) {
-        cOwed.value = 'DESCANSO';
-        cOwed.alignment = { horizontal: 'center' };
-      } else {
-        const owed = worked < baseHoursPerDay ? (baseHoursPerDay - worked) : 0;
-        cOwed.value = toExcelTime(owed);
-        cOwed.numFmt = '[h]:mm';
-        cOwed.alignment = { horizontal: 'center' };
-      }
+      const owed = worked < baseHoursPerDay ? (baseHoursPerDay - worked) : 0;
+      cOwed.value = toExcelTime(owed);
+      cOwed.numFmt = '[h]:mm';
+      cOwed.alignment = { horizontal: 'center' };
 
       daysArr.push({ date: dateStr, worked, overtime });
       col++;
     }
 
-    // ---- Resumen semanal con regla especial para última semana parcial
-    // Agrupar días por lunes de la semana
+    // ---- Resumen semanal sin salirse del rango
+    // Agrupar por lunes
     const weeksMap = new Map();
     for (const d of daysArr) {
       const wk = mondayOf(d.date);
       if (!weeksMap.has(wk)) weeksMap.set(wk, []);
       weeksMap.get(wk).push(d);
     }
-    // Detectar la última semana del rango (mayor weekStart)
-    const weekStarts = Array.from(weeksMap.keys()).sort();
-    const lastWeekStart = weekStarts[weekStarts.length - 1];
 
+    const weekStarts = Array.from(weeksMap.keys()).sort();
+
+    // Política empresa para semana completa
     const WEEK_TARGET = 48;
+
     let sumWorked = 0, sumExtra = 0, sumOwed = 0, sumNet = 0;
     const weekly = [];
 
     for (const weekStart of weekStarts) {
       const arr = weeksMap.get(weekStart).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+      const canonicalStart = weekStart;
+      const canonicalEnd = addDays(weekStart, 6);
+      // Recortar a rango
+      const clipStart = maxDate(canonicalStart, rangeStart);
+      const clipEnd = minDate(canonicalEnd, rangeEnd);
+
+      // Días cubiertos por esta semana dentro del rango
+      const coveredDates = new Set(arr.map(x => x.date));
+      // workedSum: solo días presentes
       const workedSum = arr.reduce((acc, x) => acc + safeNum(x.worked), 0);
 
-      // ¿Semana completa? (7 días dentro del rango) — si NO y es la última semana, usar regla diaria
-      const isFullWeek = arr.length === 7;
-      const isLastWeek = weekStart === lastWeekStart;
+      // ¿Semana completa dentro del rango?
+      const isFullInsideRange = (clipStart === canonicalStart) && (clipEnd === canonicalEnd);
 
       let extraWeek = 0;
       let owedWeek = 0;
 
-      if (isLastWeek && !isFullWeek) {
-        // ---- Última semana parcial: suma por día vs base 8h
-        extraWeek = arr.reduce((acc, x) => acc + Math.max(0, safeNum(x.worked) - baseHoursPerDay), 0);
-        owedWeek  = arr.reduce((acc, x) => acc + Math.max(0, baseHoursPerDay - safeNum(x.worked)), 0);
-      } else {
-        // ---- Semanas completas (o cualquier otra que no sea la última parcial): regla 48h
+      if (isFullInsideRange) {
+        // Semana completa: regla 48 h
         extraWeek = Math.max(0, workedSum - WEEK_TARGET);
         owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
+      } else {
+        // Semana parcial (por bordes del rango): regla diaria
+        // Para cada día dentro del rango [clipStart..clipEnd], sumar (worked-base)+ y (base-worked)+
+        let cursor = clipStart;
+        while (cursor <= clipEnd) {
+          // Buscar si hay ese día en arr
+          const d = arr.find(x => x.date === cursor);
+          const worked = d ? safeNum(d.worked) : 0;
+          extraWeek += Math.max(0, worked - baseHoursPerDay);
+          owedWeek  += Math.max(0, baseHoursPerDay - worked);
+          cursor = addDays(cursor, 1);
+        }
       }
 
       const netW = extraWeek - owedWeek;
 
       weekly.push({
-        weekStart,
-        weekEnd: addDays(weekStart, 6),
-        workedDec: workedSum,
-        overtimeDec: extraWeek,
-        owedDec: owedWeek,
+        weekStart: clipStart,                 // mostrado ya recortado
+        weekEnd: clipEnd,
+        workedDec: workedSum,                 // total trabajado de días presentes
+        overtimeDec: extraWeek,               // según regla aplicada
+        owedDec: owedWeek,                    // según regla aplicada
       });
 
       sumWorked += workedSum;
@@ -190,23 +209,23 @@ async function buildWorkbook(employeesCalcs) {
     }
     cTotal.alignment = { horizontal: 'center' };
 
-    // ---- Resumen semanal (meta 48h con regla de última semana parcial)
+    // ---- Resumen semanal
     let row = 10;
-    ws.getCell(`B${row}`).value = 'Resumen semanal (meta 48 h)';
+    ws.getCell(`B${row}`).value = 'Resumen semanal (sin salir del rango; meta 48 h si completa)';
     ws.getCell(`B${row}`).font = { bold: true };
     row++;
 
     // Encabezados
-    ws.getCell(`B${row}`).value = 'Semana';
+    ws.getCell(`B${row}`).value = 'Semana (rango recortado)';
     ws.getCell(`C${row}`).value = 'Trabajadas';
     ws.getCell(`D${row}`).value = 'Horas extra';
-    ws.getCell(`E${row}`).value = 'Horas a deber (48h)';
-    ws.getCell(`F${row}`).value = 'Neto (Extra - Deber)';
+    ws.getCell(`E${row}`).value = 'Horas a deber';
+    ws.getCell(`F${row}`).value = 'Neto';
     ['B','C','D','E','F'].forEach(colL => {
       const cell = ws.getCell(`${colL}${row}`);
       cell.font = { bold: true };
       cell.alignment = { horizontal: 'center' };
-      ws.getColumn(colL).width = Math.max(ws.getColumn(colL).width || 12, 16);
+      ws.getColumn(colL).width = Math.max(ws.getColumn(colL).width || 12, 18);
     });
     row++;
 
@@ -231,7 +250,7 @@ async function buildWorkbook(employeesCalcs) {
         co.numFmt = '[h]:mm';
         co.alignment = { horizontal: 'center' };
 
-        const netW = w.overtimeDec - w.owedDec; // == según regla aplicada
+        const netW = w.overtimeDec - w.owedDec;
         const cn = ws.getCell(`F${row}`);
         if (netW >= 0) {
           cn.value = toExcelTime(netW);
