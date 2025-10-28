@@ -78,7 +78,7 @@ async function buildWorkbook(employeesCalcs) {
 
     // Determinar rango declarado por computeFromSessions
     const rangeStart = calc?.rangeStart || (calc?.days?.[0]?.date ?? null);
-    const rangeEnd   = calc?.rangeEnd   || (calc?.days?.[calc?.days?.length - 1]?.date ?? null);
+    const rangeEnd = calc?.rangeEnd || (calc?.days?.[calc?.days?.length - 1]?.date ?? null);
 
     // ---- Grilla diaria
     let col = 3; // C
@@ -168,7 +168,7 @@ async function buildWorkbook(employeesCalcs) {
       if (isFullInsideRange) {
         // Semana completa: regla 48 h
         extraWeek = Math.max(0, workedSum - WEEK_TARGET);
-        owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
+        owedWeek = Math.max(0, WEEK_TARGET - workedSum);
       } else {
         // Semana parcial (por bordes del rango): regla diaria
         // Para cada día dentro del rango [clipStart..clipEnd], sumar (worked-base)+ y (base-worked)+
@@ -178,7 +178,12 @@ async function buildWorkbook(employeesCalcs) {
           const d = arr.find(x => x.date === cursor);
           const worked = d ? safeNum(d.worked) : 0;
           extraWeek += Math.max(0, worked - baseHoursPerDay);
-          owedWeek  += Math.max(0, baseHoursPerDay - worked);
+          owedWeek += Math.max(0, baseHoursPerDay - worked);
+          const dow = new Date(cursor + 'T00:00:00').getDay(); // 0 = Domingo
+          if (dow === 0 && worked > 0) {
+            extraWeek += 8;
+          }
+
           cursor = addDays(cursor, 1);
         }
       }
@@ -194,9 +199,9 @@ async function buildWorkbook(employeesCalcs) {
       });
 
       sumWorked += workedSum;
-      sumExtra  += extraWeek;
-      sumOwed   += owedWeek;
-      sumNet    += netW;
+      sumExtra += extraWeek;
+      sumOwed += owedWeek;
+      sumNet += netW;
     }
 
     // ---- Total Neto (Extras - Deber) en C3
@@ -221,7 +226,7 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell(`D${row}`).value = 'Horas extra';
     ws.getCell(`E${row}`).value = 'Horas a deber';
     ws.getCell(`F${row}`).value = 'Neto';
-    ['B','C','D','E','F'].forEach(colL => {
+    ['B', 'C', 'D', 'E', 'F'].forEach(colL => {
       const cell = ws.getCell(`${colL}${row}`);
       cell.font = { bold: true };
       cell.alignment = { horizontal: 'center' };
