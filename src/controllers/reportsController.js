@@ -2,8 +2,12 @@
 const dayjs = require('dayjs');
 const { listEmployees } = require('../repositories/employeesRepo');
 const { listByEmployee } = require('../repositories/sessionsRepo');
-const { computeFromSessions } = require('../services/overtimeService');
-const { buildWorkbook } = require('../services/excelService');
+
+// ⚠️ Ajusta estas rutas según tus nombres reales de archivo:
+//   - '../services/overtime.service'  o  '../services/overtimeService'
+const { computeFromSessions } = require('../services/overtime.service');
+//   - '../services/excel.service'     o  '../services/excelService'
+const { buildWorkbook } = require('../services/excel.service');
 
 const toYMD = (v) => (v ? dayjs(v).format('YYYY-MM-DD') : null);
 
@@ -13,15 +17,15 @@ const normalizeSessions = (rows = []) =>
     employeeId: r.employeeId,
     workDate: toYMD(r.workDate),                 // 'YYYY-MM-DD'
     startTime: String(r.startTime || '').trim(), // 'HH:mm'
-    endTime:   String(r.endTime   || '').trim(),
-    hadLunch:  !!r.hadLunch,
+    endTime: String(r.endTime || '').trim(),
+    hadLunch: !!r.hadLunch,
     lunchMinutes: r.lunchMinutes
   }));
 
 // ---------- Helpers ----------
 const eachDateYMD = (from, to) => {
   const start = dayjs(from).startOf('day');
-  const end   = dayjs(to).startOf('day');
+  const end = dayjs(to).startOf('day');
   const days = [];
   for (let d = start; !d.isAfter(end); d = d.add(1, 'day')) {
     days.push(d.format('YYYY-MM-DD'));
@@ -34,7 +38,7 @@ const fillMissingDays = (calc = {}, from, to) => {
   const existing = new Map((calc.days || []).map(x => [x.date, x]));
   const filledDays = allDays.map(date => existing.get(date) || { date, worked: 0, overtime: 0 });
   filledDays.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  return { ...calc, days: filledDays };
+  return { ...calc, days: filledDays, rangeStart: from, rangeEnd: to };
 };
 
 // Lunes de la semana (0=Dom,1=Lun,...)
@@ -52,14 +56,21 @@ const decToHHMM = (hDec) => {
   let abs = Math.abs(hDec);
   const hh = Math.floor(abs);
   let mm = Math.round((abs - hh) * 60);
-  if (mm === 60) { mm = 0; abs = hh + 1; }
-  return `${sign}${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+  if (mm === 60) { mm = 0; }
+  return `${sign}${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 };
+
+const addDays = (dateStr, n) => dayjs(dateStr).add(n, 'day').format('YYYY-MM-DD');
+const minDate = (a, b) => (a < b ? a : b);
+const maxDate = (a, b) => (a > b ? a : b);
 // --------------------------------
 
 async function preview(req, res) {
   try {
     const { employeeIds, from, to, baseHoursPerDay, lunchMinutesDefault } = req.body;
+    if (!from || !to) {
+      return res.status(400).json({ ok: false, error: 'Faltan from/to (YYYY-MM-DD)' });
+    }
 
     const all = await listEmployees();
     const selected = (employeeIds?.length ? all.filter(e => employeeIds.includes(e.id)) : all);
@@ -69,25 +80,31 @@ async function preview(req, res) {
       const raw = await listByEmployee(emp.id, from, to);
       const sessions = normalizeSessions(raw);
 
-      // Cálculo base del servicio (devuelve worked / overtime por día)
-      const calcBase = computeFromSessions(sessions, { baseHoursPerDay, lunchMinutesDefault });
-      // Rellenar días del rango
+      // ⬅️ PASAR RANGO para que el servicio no se salga
+      const calcBase = computeFromSessions(sessions, {
+        baseHoursPerDay,
+        lunchMinutesDefault,
+        rangeStart: from,
+        rangeEnd: to,
+      });
+
+      // Rellenar días del rango (0h donde falte)
       const calcFilled = fillMissingDays(calcBase, from, to);
 
-      // Base diaria (para owed diario informativo)
+      // Base diaria (para 'owed' diario)
       const base = Number.isFinite(Number(calcFilled?.baseHoursPerDay))
         ? Number(calcFilled.baseHoursPerDay)
         : (Number.isFinite(Number(baseHoursPerDay)) ? Number(baseHoursPerDay) : 8);
 
-      // Enriquecer días (displays) y mantener numéricos
+      // Enriquecer días
       const days = (calcFilled.days || []).map(d => {
         const worked = Number(d?.worked) || 0;
         const overtime = Number(d?.overtime) || 0;
 
-        const workedDisplay   = worked === 0 ? 'DESCANSO' : decToHHMM(worked);
+        const workedDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(worked);
         const overtimeDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(overtime);
-        const owedDay = (worked > 0 && worked < base) ? (base - worked) : 0;
-        const owedDisplay = worked === 0 ? 'DESCANSO' : decToHHMM(owedDay);
+        const owedDay = worked < base ? (base - worked) : 0; // domingo incluido
+        const owedDisplay = decToHHMM(owedDay);
 
         return {
           ...d,
@@ -100,7 +117,7 @@ async function preview(req, res) {
         };
       });
 
-      // ---- Resumen semanal con excepción: última semana parcial usa regla diaria
+      // ---- Resumen semanal *recortado al rango* y con regla diaria en semanas parciales
       const weeksMap = new Map();
       for (const d of days) {
         const wk = mondayOf(d.date);
@@ -108,36 +125,61 @@ async function preview(req, res) {
         weeksMap.get(wk).push(d);
       }
       const weekStarts = Array.from(weeksMap.keys()).sort();
-      const lastWeekStart = weekStarts[weekStarts.length - 1];
 
-      const WEEK_TARGET = 48; // h por semana completa
+      const WEEK_TARGET = 48;
       const weekly = [];
-      let totalOvertimeDec = 0; // suma de extras semanales (según regla)
-      let totalOwedDec = 0;     // suma de deudas semanales (según regla)
+      let totalOvertimeDec = 0;
+      let totalOwedDec = 0;
 
       for (const weekStart of weekStarts) {
-        const arr = weeksMap.get(weekStart).sort((a,b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const arr = weeksMap.get(weekStart).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+        // Semana “canónica”
+        const canonicalStart = weekStart;
+        const canonicalEnd = addDays(weekStart, 6);
+
+        // Recortar al rango
+        const clipStart = maxDate(canonicalStart, from);
+        const clipEnd = minDate(canonicalEnd, to);
+
+        // Suma trabajada (sólo días presentes)
         const workedSum = arr.reduce((acc, x) => acc + (Number(x.worked) || 0), 0);
 
-        const isFullWeek = arr.length === 7;
-        const isLastWeek = weekStart === lastWeekStart;
+        // ¿La semana está completamente dentro del rango?
+        const isFullInsideRange = (clipStart === canonicalStart) && (clipEnd === canonicalEnd);
 
         let extraWeek = 0;
         let owedWeek = 0;
 
-        if (isLastWeek && !isFullWeek) {
-          // Última semana parcial -> regla diaria (base 8h por día)
-          extraWeek = arr.reduce((acc, x) => acc + Math.max(0, (Number(x.worked) || 0) - base), 0);
-          owedWeek  = arr.reduce((acc, x) => acc + Math.max(0, base - (Number(x.worked) || 0)), 0);
-        } else {
-          // Semanas completas (o cualquier otra no última parcial) -> regla 48h
+        if (isFullInsideRange) {
+          // Semana completa -> 48h
           extraWeek = Math.max(0, workedSum - WEEK_TARGET);
-          owedWeek  = Math.max(0, WEEK_TARGET - workedSum);
+          owedWeek = Math.max(0, WEEK_TARGET - workedSum);
+        } else {
+          // Semana parcial (inicio o fin) -> regla diaria
+          let cur = clipStart;
+          while (cur <= clipEnd) {
+            const d = arr.find(x => x.date === cur);
+            const w = d ? Number(d.worked) || 0 : 0;
+            const dow = dayjs(cur).day(); // 0=Domingo
+
+            // ✅ Regla especial: si es domingo y trabajó, se suman +8h extra fijas
+            if (dow === 0 && w > 0) {
+              extraWeek += 8; // 8 horas extras fijas
+            } else {
+              extraWeek += Math.max(0, w - base);
+              owedWeek += Math.max(0, base - w);
+            }
+
+            cur = addDays(cur, 1);
+          }
         }
 
+
         weekly.push({
-          weekStart,
-          weekEnd: dayjs(weekStart).add(6, 'day').format('YYYY-MM-DD'),
+          // Etiquetas recortadas
+          weekStart: clipStart,
+          weekEnd: clipEnd,
           workedDec: workedSum,
           overtimeDec: extraWeek,
           owedDec: owedWeek,
@@ -180,6 +222,9 @@ async function preview(req, res) {
 async function excel(req, res) {
   try {
     const { employeeIds, from, to, baseHoursPerDay, lunchMinutesDefault } = req.body;
+    if (!from || !to) {
+      return res.status(400).json({ ok: false, error: 'Faltan from/to (YYYY-MM-DD)' });
+    }
 
     const all = await listEmployees();
     const selected = (employeeIds?.length ? all.filter(e => employeeIds.includes(e.id)) : all);
@@ -188,14 +233,22 @@ async function excel(req, res) {
     for (const emp of selected) {
       const raw = await listByEmployee(emp.id, from, to);
       const sessions = normalizeSessions(raw);
-      const calcBase = computeFromSessions(sessions, { baseHoursPerDay, lunchMinutesDefault });
+
+      // ⬅️ PASAR RANGO
+      const calcBase = computeFromSessions(sessions, {
+        baseHoursPerDay,
+        lunchMinutesDefault,
+        rangeStart: from,
+        rangeEnd: to,
+      });
+
       const calc = fillMissingDays(calcBase, from, to);
       blocks.push({ employee: emp, calc });
     }
 
     const wb = await buildWorkbook(blocks);
-    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition','attachment; filename="horas_overtime.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="horas_overtime.xlsx"');
     await wb.xlsx.write(res);
     res.end();
   } catch (e) {
