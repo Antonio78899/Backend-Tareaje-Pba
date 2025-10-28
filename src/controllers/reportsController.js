@@ -5,7 +5,7 @@ const { listByEmployee } = require('../repositories/sessionsRepo');
 
 // ⚠️ Ajusta estas rutas según tus nombres reales de archivo:
 //   - '../services/overtime.service'  o  '../services/overtimeService'
-const { computeFromSessions } = require('../services/overtime.service');
+const { computeFromSessions } = require('../services/overtimeService');
 //   - '../services/excel.service'     o  '../services/excelService'
 const { buildWorkbook } = require('../services/excel.service');
 
