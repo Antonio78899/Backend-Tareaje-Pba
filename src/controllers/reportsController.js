@@ -6,8 +6,8 @@ const { listByEmployee } = require('../repositories/sessionsRepo');
 // ⚠️ Ajusta estas rutas según tus nombres reales de archivo:
 //   - '../services/overtime.service'  o  '../services/overtimeService'
 const { computeFromSessions } = require('../services/overtimeService');
-//   - '../services/excel.service'     o  '../services/excelService'
-const { buildWorkbook } = require('../services/excel.service');
+//   - '../services/excelService'     o  '../services/excelService'
+const { buildWorkbook } = require('../services/excelService');
 
 const toYMD = (v) => (v ? dayjs(v).format('YYYY-MM-DD') : null);
 

@@ -1,4 +1,4 @@
-// src/services/excel.service.js
+// src/services/excelService.js
 const ExcelJS = require('exceljs');
 
 const safeNum = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
