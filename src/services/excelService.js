@@ -170,23 +170,45 @@ async function buildWorkbook(employeesCalcs) {
         extraWeek = Math.max(0, workedSum - WEEK_TARGET);
         owedWeek = Math.max(0, WEEK_TARGET - workedSum);
       } else {
-        // Semana parcial (por bordes del rango): regla diaria
-        // Para cada día dentro del rango [clipStart..clipEnd], sumar (worked-base)+ y (base-worked)+
+        // Semana parcial → regla diaria con excepción del domingo
+        // 1) ¿Hay otro descanso distinto del domingo en esta semana parcial?
+        let hasOtherRest = false;
+        {
+          let cursor = clipStart;
+          while (cursor <= clipEnd) {
+            const d = arr.find(x => x.date === cursor);
+            const w = d ? safeNum(d.worked) : 0;
+            const dow = new Date(cursor + 'T00:00:00').getDay(); // 0=Domingo
+            if (dow !== 0 && w === 0) { hasOtherRest = true; break; }
+            cursor = addDays(cursor, 1);
+          }
+        }
+
+        // 2) Calcular extra/owed día a día con la excepción
         let cursor = clipStart;
+        let workedSumDisplay = 0; // para mostrar "Trabajadas" coherente
         while (cursor <= clipEnd) {
-          // Buscar si hay ese día en arr
           const d = arr.find(x => x.date === cursor);
           const worked = d ? safeNum(d.worked) : 0;
-          extraWeek += Math.max(0, worked - baseHoursPerDay);
-          owedWeek += Math.max(0, baseHoursPerDay - worked);
           const dow = new Date(cursor + 'T00:00:00').getDay(); // 0 = Domingo
-          if (dow === 0 && worked > 0) {
-            extraWeek += 8;
+
+          if (dow === 0 && worked > 0 && hasOtherRest) {
+            // Domingo trabajado se considera DESCANSO
+            owedWeek += Math.max(0, baseHoursPerDay - 0); // = base
+            // no suma extras ni trabajadas
+          } else {
+            extraWeek += Math.max(0, worked - baseHoursPerDay);
+            owedWeek += Math.max(0, baseHoursPerDay - worked);
+            workedSumDisplay += worked;
           }
 
           cursor = addDays(cursor, 1);
         }
+
+        // Sobrescribir el valor mostrado de trabajadas para semanas parciales
+        workedForRow = workedSumDisplay;
       }
+
 
       const netW = extraWeek - owedWeek;
 

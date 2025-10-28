@@ -156,23 +156,48 @@ async function preview(req, res) {
           extraWeek = Math.max(0, workedSum - WEEK_TARGET);
           owedWeek = Math.max(0, WEEK_TARGET - workedSum);
         } else {
-          // Semana parcial (inicio o fin) -> regla diaria
+          // Semana parcial (inicio o fin) -> regla diaria con excepción del domingo
+          // 1) Detectar si existe OTRO día de descanso en la semana parcial
+          let hasOtherRest = false;
+          {
+            let cur = clipStart;
+            while (cur <= clipEnd) {
+              const d = arr.find(x => x.date === cur);
+              const w = d ? Number(d.worked) || 0 : 0;
+              const dow = dayjs(cur).day(); // 0=Domingo
+              if (dow !== 0 && w === 0) { // descanso distinto de domingo
+                hasOtherRest = true;
+                break;
+              }
+              cur = addDays(cur, 1);
+            }
+          }
+
+          // 2) Calcular extra/owed día a día considerando la excepción
           let cur = clipStart;
+          let workedSumDisplay = 0; // para mostrar "Trabajadas" coherente en semana parcial
           while (cur <= clipEnd) {
             const d = arr.find(x => x.date === cur);
             const w = d ? Number(d.worked) || 0 : 0;
             const dow = dayjs(cur).day(); // 0=Domingo
 
-            // ✅ Regla especial: si es domingo y trabajó, se suman +8h extra fijas
-            if (dow === 0 && w > 0) {
-              extraWeek += 8; // 8 horas extras fijas
+            if (dow === 0 && w > 0 && hasOtherRest) {
+              // Excepción: domingo trabajado pasa a considerarse DESCANSO
+              // (no suma extra, suma a deber base, y no suma a trabajadas de la semana)
+              owedWeek += Math.max(0, base - 0); // = base
+              // workedSumDisplay no suma nada
             } else {
+              // Regla diaria normal
               extraWeek += Math.max(0, w - base);
               owedWeek += Math.max(0, base - w);
+              workedSumDisplay += w;
             }
 
             cur = addDays(cur, 1);
           }
+
+          // Sobrescribe workedDec para semanas parciales con el display calculado
+          workedSumForPartial = workedSumDisplay;
         }
 
 
