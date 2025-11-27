@@ -19,6 +19,29 @@ const decToHHMM = (h) => {
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
+// Convierte una representación de hora a objeto Date sobre dateStr (o null)
+const timeToDate = (dateStr, t) => {
+  if (t == null) return null;
+  if (t instanceof Date) return t;
+  const s = String(t).trim();
+  if (!s) return null;
+  // número decimal de horas (ej. 8.5)
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    const h = Math.floor(n);
+    const m = Math.round((n - h) * 60);
+    const hh = String(h).padStart(2, '0');
+    const mm = String(m).padStart(2, '0');
+    return new Date(`${dateStr}T${hh}:${mm}:00`);
+  }
+  // HH:MM o HH:MM:SS
+  if (/^\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(s)) {
+    return new Date(`${dateStr}T${s}`);
+  }
+  // tratar como ISO u otra cadena
+  return new Date(s);
+};
+
 // ---- Helpers (lunes–domingo)
 const ymd = (d) => {
   const y = d.getFullYear();
@@ -70,6 +93,13 @@ async function buildWorkbook(employeesCalcs) {
     ws.getCell('B7').font = { bold: true };
     ws.getCell('B8').value = 'Horas a Deber';
     ws.getCell('B8').font = { bold: true };
+
+    // NUEVOS: Hora inicio / Hora salida
+    ws.getCell('B9').value = 'Hora Inicio';
+    ws.getCell('B9').font = { bold: true };
+    ws.getCell('B10').value = 'Hora Salida';
+    ws.getCell('B10').font = { bold: true };
+    // ...existing code...
 
     // Base diaria requerida (usada también para "a deber" diario)
     const baseHoursPerDay = Number.isFinite(Number(calc?.baseHoursPerDay))
@@ -123,6 +153,32 @@ async function buildWorkbook(employeesCalcs) {
       cOwed.value = toExcelTime(owed);
       cOwed.numFmt = '[h]:mm';
       cOwed.alignment = { horizontal: 'center' };
+
+      // Hora Inicio (fila 9)
+      const startVal = d?.start || d?.startTime || d?.inicio || d?.horaInicio;
+      const startDate = dateStr ? timeToDate(dateStr, startVal) : null;
+      const cStart = ws.getRow(9).getCell(col);
+      if (startDate) {
+        cStart.value = startDate;
+        cStart.numFmt = 'hh:mm';
+        cStart.alignment = { horizontal: 'center' };
+      } else {
+        cStart.value = '';
+        cStart.alignment = { horizontal: 'center' };
+      }
+
+      // Hora Salida (fila 10)
+      const endVal = d?.end || d?.endTime || d?.salida || d?.horaSalida;
+      const endDate = dateStr ? timeToDate(dateStr, endVal) : null;
+      const cEnd = ws.getRow(10).getCell(col);
+      if (endDate) {
+        cEnd.value = endDate;
+        cEnd.numFmt = 'hh:mm';
+        cEnd.alignment = { horizontal: 'center' };
+      } else {
+        cEnd.value = '';
+        cEnd.alignment = { horizontal: 'center' };
+      }
 
       daysArr.push({ date: dateStr, worked, overtime });
       col++;
@@ -237,7 +293,7 @@ async function buildWorkbook(employeesCalcs) {
     cTotal.alignment = { horizontal: 'center' };
 
     // ---- Resumen semanal
-    let row = 10;
+    let row = 12;
     ws.getCell(`B${row}`).value = 'Resumen semanal (sin salir del rango; meta 48 h si completa)';
     ws.getCell(`B${row}`).font = { bold: true };
     row++;
