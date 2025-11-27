@@ -32,7 +32,6 @@ function computeFromSessions(sessions, opts = {}) {
   const base = safeNum(opts.baseHoursPerDay, BASE_HOURS);
   const lunchDef = safeNum(opts.lunchMinutesDefault, DEFAULT_LUNCH);
 
-  // Rango obligatorio para no salirnos (inclusive)
   const rangeStart = opts.rangeStart ? ymd(opts.rangeStart) : null;
   const rangeEnd   = opts.rangeEnd   ? ymd(opts.rangeEnd)   : null;
 
@@ -40,19 +39,18 @@ function computeFromSessions(sessions, opts = {}) {
     throw new Error('computeFromSessions: rango inválido. Provee { rangeStart, rangeEnd } (YYYY-MM-DD).');
   }
 
-  // Acumular horas trabajadas por día dentro del rango únicamente
-  const byDate = new Map(); // clave: 'YYYY-MM-DD' → horas decimales
+  // 🔹 Ahora guardamos por día: horas trabajadas + primera entrada + última salida
+  const byDate = new Map(); // 'YYYY-MM-DD' -> { worked, firstStart, lastEnd }
 
   for (const s of (sessions || [])) {
     const ymdStr = s?.workDate ? dayjs(s.workDate).format('YYYY-MM-DD') : null;
     if (!ymdStr) continue;
 
-    // Ignorar fuera de rango
     if (ymdStr < rangeStart || ymdStr > rangeEnd) continue;
 
     const st = normalizeTime(s.startTime);
     const et = normalizeTime(s.endTime);
-    if (!st || !et) continue; // ignora filas mal formateadas
+    if (!st || !et) continue;
 
     let start = dt(ymdStr, st);
     let end   = dt(ymdStr, et);
@@ -62,24 +60,47 @@ function computeFromSessions(sessions, opts = {}) {
     const lunchMin = s.hadLunch ? safeNum(s.lunchMinutes, lunchDef) : 0;
     worked = Math.max(0, worked - lunchMin / 60);
 
-    byDate.set(ymdStr, (byDate.get(ymdStr) || 0) + worked);
+    const prev = byDate.get(ymdStr) || {
+      worked: 0,
+      firstStart: null,
+      lastEnd: null,
+    };
+
+    prev.worked += worked;
+
+    // primera hora de entrada del día
+    if (!prev.firstStart || start.isBefore(prev.firstStart)) {
+      prev.firstStart = start;
+    }
+    // última hora de salida del día
+    if (!prev.lastEnd || end.isAfter(prev.lastEnd)) {
+      prev.lastEnd = end;
+    }
+
+    byDate.set(ymdStr, prev);
   }
 
-  // Rellenar todos los días del rango: 0 h donde no hay sesiones
+  // 🔹 Rellenar todos los días del rango (y añadir startTime/endTime cuando existan)
   const days = [];
   let cursor = rangeStart;
   while (cursor <= rangeEnd) {
-    const worked = safeNum(byDate.get(cursor), 0);
-    const overtime = Math.max(0, worked - base);
+    const rec = byDate.get(cursor);
+    const workedRaw = rec ? rec.worked : 0;
+    const worked = Number(workedRaw.toFixed(2));
+    const overtime = Number(Math.max(0, worked - base).toFixed(2));
+
     days.push({
       date: cursor,
-      worked: Number(worked.toFixed(2)),
-      overtime: Number(overtime.toFixed(2)),
+      worked,
+      overtime,
+      // estas dos claves son las que luego usará excelService
+      startTime: rec?.firstStart ? rec.firstStart.format('HH:mm') : null,
+      endTime:   rec?.lastEnd   ? rec.lastEnd.format('HH:mm')   : null,
     });
+
     cursor = addDays(cursor, 1);
   }
 
-  // Total de horas extra (sólo suma extras diarias; el neto semanal se calcula en Excel)
   const totalOvertime = Number(
     days.reduce((acc, d) => acc + safeNum(d.overtime, 0), 0).toFixed(2)
   );
@@ -92,5 +113,6 @@ function computeFromSessions(sessions, opts = {}) {
     rangeEnd,
   };
 }
+
 
 module.exports = { computeFromSessions };
